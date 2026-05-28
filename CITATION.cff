@@ -1,0 +1,34 @@
+cff-version: 1.2.0
+message: If you use this reconstruction, please cite the references below. Additionally,
+  please cite the underlying paleoclimate data sources listed in data_references.bib
+  (482 publications across 647 datasets) and the lipdverse compilation.
+title: PReSto reconstruction template
+type: software
+authors:
+- family-names: Your last name
+  given-names: Your first name
+url: https://github.com/DaveEdge1/presto-template
+references:
+- type: article
+  title: 'REPLACE: cite the paper that introduces your reconstruction method here'
+  authors:
+  - family-names: Author
+    given-names: First
+  year: 2026
+  notes: Method reference for the reconstruction wrapped by this template.
+- type: software
+  title: The Paleoclimate Reconstruction Storehouse (PReSto) platform
+  authors:
+  - family-names: Edge
+    given-names: David
+  - family-names: McKay
+    given-names: Nicholas
+  - family-names: Khider
+    given-names: Deborah
+  - family-names: Emile-Geay
+    given-names: Julien
+  doi: 10.5281/zenodo.8274756
+  url: https://zenodo.org/record/8274756
+- type: generic
+  title: Source paleoclimate data bibliography
+  notes: 482 publications across 647 datasets in data_references.bib

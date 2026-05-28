@@ -1,0 +1,150 @@
+# Bundles each successful reconstruction into a GitHub Release tagged
+# `recon-<run_id>`. Releases are Zenodo-friendly: if you wire up the
+# Zenodo↔GitHub integration on this repo, every release gets a citable
+# DOI automatically (see ADAPTING.md for the one-time setup).
+#
+# Triggered automatically after each successful Reconstruction workflow
+# run, or manually via `gh workflow run release-recon.yml`.
+#
+# Idempotent: skips if a release for the run_id already exists.
+
+name: Release reconstruction
+
+on:
+  workflow_run:
+    workflows: ["Reconstruction"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Specific Reconstruction run ID to bundle (default: latest successful)'
+        required: false
+        type: string
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    permissions:
+      contents: write
+      actions: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve run ID
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "${{ inputs.run_id }}" ]; then
+            RECON_RUN_ID="${{ inputs.run_id }}"
+          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+            RECON_RUN_ID="${{ github.event.workflow_run.id }}"
+          else
+            RECON_RUN_ID=$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${{ github.repository }}/actions/workflows/reconstruct.yml/runs?status=success&per_page=1" \
+              --jq '.workflow_runs[0].id')
+          fi
+          if [ -z "$RECON_RUN_ID" ] || [ "$RECON_RUN_ID" = "null" ]; then
+            echo "ERROR: could not resolve a Reconstruction run ID"; exit 1
+          fi
+          echo "recon_run_id=${RECON_RUN_ID}" >> $GITHUB_OUTPUT
+          echo "tag=recon-${RECON_RUN_ID}"    >> $GITHUB_OUTPUT
+          echo "Resolved run_id=$RECON_RUN_ID"
+
+      - name: Skip if release already exists
+        id: skip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ steps.resolve.outputs.tag }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release ${{ steps.resolve.outputs.tag }} already exists — nothing to do."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download reconstruction artifact
+        if: steps.skip.outputs.skip == 'false'
+        uses: actions/download-artifact@v4
+        with:
+          name: reconstruction-${{ steps.resolve.outputs.recon_run_id }}
+          path: ./bundle/results
+          run-id: ${{ steps.resolve.outputs.recon_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download proxy data artifact (best-effort)
+        # 7-day retention, so older runs may have lost it. Comparison
+        # logic in downstream tools is best-effort.
+        if: steps.skip.outputs.skip == 'false'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: reconstruction-proxy-data-${{ steps.resolve.outputs.recon_run_id }}
+          path: ./bundle/proxy
+          run-id: ${{ steps.resolve.outputs.recon_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Assemble release bundle
+        if: steps.skip.outputs.skip == 'false'
+        run: |
+          mkdir -p ./bundle/inputs
+          # Snapshot the inputs that produced this reconstruction so the
+          # release is self-describing.
+          cp config/user_config.yml ./bundle/inputs/user_config.yml
+          cp query_params.json      ./bundle/inputs/query_params.json
+          [ -f README.md ]      && cp README.md      ./bundle/inputs/README.md
+          [ -f CITATION.cff ]   && cp CITATION.cff   ./bundle/inputs/CITATION.cff
+          [ -f data_references.bib ] && cp data_references.bib ./bundle/inputs/data_references.bib
+
+          # Build the release-notes markdown.
+          OWNER_LC="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          REPO_NAME="${{ github.event.repository.name }}"
+          PAGES_URL="https://${OWNER_LC}.github.io/${REPO_NAME}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.resolve.outputs.recon_run_id }}"
+          PROXY_LINE=""
+          if [ -f ./bundle/proxy/lipd_legacy.pkl ]; then
+            PROXY_LINE="- \`lipd_legacy.pkl\` — the proxy database used"
+          fi
+          {
+            echo "## Reconstruction \`${{ steps.resolve.outputs.recon_run_id }}\`"
+            echo ""
+            echo "Bundle of inputs + outputs for [run ${{ steps.resolve.outputs.recon_run_id }}](${RUN_URL})."
+            echo ""
+            echo "### Contents"
+            echo ""
+            echo "- \`results/\` — NetCDF + CSV + figures from the reconstruction"
+            [ -n "$PROXY_LINE" ] && echo "$PROXY_LINE"
+            echo "- \`inputs/\` — user_config.yml, query_params.json, README.md, CITATION.cff snapshots"
+            echo ""
+            echo "### Live visualization"
+            echo ""
+            echo "[${PAGES_URL}](${PAGES_URL})"
+            echo ""
+            echo "_Release auto-created by [\`release-recon.yml\`](.github/workflows/release-recon.yml)._"
+          } > release_notes.md
+
+          # Flatten the bundle into a single tarball so the release has
+          # one neat asset (Zenodo handles tars fine).
+          tar -czf "recon-${{ steps.resolve.outputs.recon_run_id }}.tar.gz" -C ./bundle .
+          ls -lh "recon-${{ steps.resolve.outputs.recon_run_id }}.tar.gz"
+
+      - name: Create release
+        if: steps.skip.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.resolve.outputs.tag }}" \
+            --title "Reconstruction ${{ steps.resolve.outputs.recon_run_id }}" \
+            --notes-file release_notes.md \
+            --target "$GITHUB_SHA" \
+            "recon-${{ steps.resolve.outputs.recon_run_id }}.tar.gz"
+
+          # Also attach top-level results files individually so users
+          # can grab a single NetCDF without downloading the tarball.
+          for f in $(find ./bundle/results -maxdepth 2 -type f \( -name '*.nc' -o -name '*.csv' \) -size -2G); do
+            gh release upload "${{ steps.resolve.outputs.tag }}" "$f" --clobber
+          done

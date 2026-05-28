@@ -1,0 +1,29 @@
+# PReSto reconstruction config — user-overwritable knobs.
+#
+# This file is OVERWRITTEN by the PReSto server on each reconstruction
+# submission with the user's chosen parameters. The version committed
+# here is the DEFAULT used by manual / local runs and CI smoke tests.
+#
+# CUSTOMIZATION:
+#   - Replace the demo knobs below with the parameters your algorithm
+#     actually needs. Keep the file schema flat-ish (one or two levels
+#     of nesting) so scripts/generate_readme.py can render it as a
+#     markdown table without special handling.
+#   - Document every knob with a short comment explaining valid ranges /
+#     options. PReSto's UI surfaces these comments to users.
+
+# ── DEMO KNOBS ──────────────────────────────────────────────────────
+# Used only by scripts/reconstruct.py (the placeholder algorithm).
+# Replace when you swap in your real reconstruction code.
+
+# Year window (inclusive) the reconstruction is computed over.
+# Years outside this range are dropped from the proxy matrix before
+# the per-year composite is calculated.
+reconstruction_window:
+  start: 1
+  end: 2000
+
+# Minimum number of non-NaN proxies a year must have to be included
+# in the output. Lower values keep more years but with noisier means;
+# higher values are more conservative.
+min_proxies_per_year: 5

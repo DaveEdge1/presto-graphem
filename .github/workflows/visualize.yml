@@ -1,0 +1,318 @@
+# Publishes the most recent successful reconstruction to GitHub Pages.
+#
+# Routing logic (the load-bearing piece in this template):
+#   inspect-output  — looks at the .nc files in the reconstruction artifact.
+#                     If any has lat+lon dims → output is SPATIAL → use presto-viz.
+#                     Otherwise (1D timeseries) → use the static-Pages tile UI.
+#
+# Both paths converge on deploy-to-github-pages, which deploys whatever
+# the routing job produced under ./pages/.
+#
+# CUSTOMIZATION:
+#   - Authors with spatial output get presto-viz for free.
+#   - Authors with 1D / non-spatial output get a tile UI surfacing every
+#     PNG in results/figures/ + CSV/NetCDF download links.
+#   - To override the autodetect (e.g., force the static path even with
+#     a spatial NetCDF), set the env var FORCE_STATIC_VIZ=true in the
+#     inspect-output job below.
+
+name: Visualize Reconstruction Results
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Reconstruction"]
+    types: [completed]
+
+jobs:
+  find-latest-run:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch'
+    outputs:
+      run_number:    ${{ steps.get_run.outputs.run_number }}
+      run_id:        ${{ steps.get_run.outputs.run_id }}
+      artifact_name: ${{ steps.get_run.outputs.artifact_name }}
+    steps:
+      - name: Find reconstruction run + artifact
+        id: get_run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            run_id="${{ github.event.workflow_run.id }}"
+            run_number="${{ github.event.workflow_run.run_number }}"
+          else
+            latest_run=$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${{ github.repository }}/actions/workflows/reconstruct.yml/runs?status=success&per_page=1" \
+              --jq '.workflow_runs[0]')
+            run_id=$(echo "$latest_run" | jq -r '.id')
+            run_number=$(echo "$latest_run" | jq -r '.run_number')
+          fi
+          if [ "$run_id" = "null" ] || [ -z "$run_id" ]; then
+            echo "Error: No successful Reconstruction runs found"; exit 1
+          fi
+          echo "run_id=$run_id"               >> $GITHUB_OUTPUT
+          echo "run_number=$run_number"       >> $GITHUB_OUTPUT
+          echo "artifact_name=reconstruction-${run_id}" >> $GITHUB_OUTPUT
+
+  inspect-output:
+    needs: find-latest-run
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      is_spatial: ${{ steps.detect.outputs.is_spatial }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download reconstruction artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.find-latest-run.outputs.artifact_name }}
+          path: ./recon-data
+          run-id: ${{ needs.find-latest-run.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: List artifact contents
+        run: ls -lhR ./recon-data/
+
+      - name: Re-upload artifact for downstream jobs
+        # download-artifact in workflow_run context can't reuse the
+        # source artifact directly; re-upload under a stable name so
+        # the visualize jobs below grab the same files without
+        # passing tokens around.
+        uses: actions/upload-artifact@v4
+        with:
+          name: recon-data-for-viz-${{ github.run_number }}
+          path: ./recon-data/
+          retention-days: 7
+
+      - name: Detect spatial vs 1D output
+        id: detect
+        run: |
+          pip install --quiet xarray netcdf4 || true
+          IS_SPATIAL=false
+          for nc in $(find ./recon-data -name '*.nc' -type f); do
+            echo "Inspecting $nc..."
+            if python3 -c "
+          import sys, xarray as xr
+          d = xr.open_dataset('$nc')
+          sys.exit(0 if {'lat','lon'}.issubset(d.dims) else 1)
+          " 2>/dev/null; then
+              IS_SPATIAL=true
+              echo "$nc has lat+lon dims — routing to presto-viz."
+              break
+            fi
+          done
+          echo "is_spatial=$IS_SPATIAL" >> $GITHUB_OUTPUT
+          echo "Routing: is_spatial=$IS_SPATIAL"
+
+  # ── Path A: SPATIAL output → presto-viz reusable workflow ───────────
+  visualize-spatial:
+    needs: [find-latest-run, inspect-output]
+    if: needs.inspect-output.outputs.is_spatial == 'true'
+    uses: DaveEdge1/presto-viz/.github/workflows/presto-viz-reusable.yml@main
+    with:
+      reconstruction_id: Reconstruction_Run_${{ needs.find-latest-run.outputs.run_number }}_Reviz_${{ github.run_number }}
+      artifact_name:     recon-data-for-viz-${{ github.run_number }}
+
+  # ── Path B: 1D / non-spatial output → static-Pages tile UI ──────────
+  visualize-static:
+    needs: [find-latest-run, inspect-output]
+    if: needs.inspect-output.outputs.is_spatial == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download recon data
+        uses: actions/download-artifact@v4
+        with:
+          name: recon-data-for-viz-${{ github.run_number }}
+          path: ./viz
+
+      - name: Build static-viz tarball
+        # Bundle the tile UI + figures + downloadable data into one
+        # artifact the deploy job consumes. Keeping this separate from
+        # the deploy job lets the deploy job stay generic across
+        # spatial / non-spatial paths.
+        run: |
+          mkdir -p ./static-viz/figures ./static-viz/data ./static-viz/images
+          # Copy figures (PNGs) and download artifacts.
+          if [ -d ./viz/figures ]; then
+            cp -r ./viz/figures/. ./static-viz/figures/ 2>/dev/null || true
+          fi
+          # Also surface any .nc / .csv at the top of the artifact.
+          find ./viz -maxdepth 2 -type f \( -name '*.nc' -o -name '*.csv' \) \
+            -exec cp {} ./static-viz/data/ \;
+          cp images/*.png ./static-viz/images/ 2>/dev/null || true
+
+          # GitHub Pages doesn't auto-index directory URLs, so synthesize
+          # a data/index.html that lists everything in data/ — without it
+          # the "Download data" tile 404s.
+          {
+            echo '<!DOCTYPE html><html><head><meta charset="utf-8">'
+            echo '<title>Reconstruction data — PReSto</title>'
+            echo '<style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:680px;margin:40px auto;padding:0 20px;color:#1a1a1a}'
+            echo 'a{color:#2563eb}h1{font-size:1.5rem}ul{line-height:1.8}.size{color:#666;font-size:.85em}</style></head>'
+            echo '<body><h1>Reconstruction data</h1>'
+            echo '<p><a href="../">&larr; Back to reconstruction</a></p><ul>'
+            for f in ./static-viz/data/*; do
+              [ -f "$f" ] || continue
+              name=$(basename "$f")
+              size=$(du -h "$f" | cut -f1)
+              echo "  <li><a href=\"${name}\">${name}</a> <span class=\"size\">(${size})</span></li>"
+            done
+            echo '</ul></body></html>'
+          } > ./static-viz/data/index.html
+
+          # Tile UI matching the rest of the PReSto ecosystem.
+          FIG_TILE=""
+          if ls ./static-viz/figures/*.png >/dev/null 2>&1; then
+            FIRST_PNG=$(ls ./static-viz/figures/*.png | head -n 1 | xargs basename)
+            FIG_TILE="<a class=\"tile\" href=\"figures/${FIRST_PNG}\"><img src=\"figures/${FIRST_PNG}\" alt=\"Figure\"><span>Reconstruction Figure</span></a>"
+          fi
+          DATA_TILE=""
+          if ls ./static-viz/data/* >/dev/null 2>&1; then
+            DATA_TILE="<a class=\"tile\" href=\"data/\"><img src=\"images/visualization.png\" alt=\"Data\" onerror=\"this.style.display='none'\"><span>Download data</span></a>"
+          fi
+
+          cat > ./static-viz/index.html <<HTMLEOF
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Reconstruction — PReSto</title>
+            <style>
+              :root { --bg: #f7f8fa; --fg: #1a1a1a; --accent: #2563eb;
+                      --tile-bg: #fff;
+                      --tile-shadow: 0 2px 8px rgba(0,0,0,0.08);
+                      --tile-shadow-hover: 0 6px 18px rgba(0,0,0,0.14); }
+              * { box-sizing: border-box; }
+              body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                     background: var(--bg); color: var(--fg); margin: 0; min-height: 100vh;
+                     display: flex; flex-direction: column; }
+              header { text-align: center; padding: 48px 24px 24px; }
+              header h1 { margin: 0; font-size: 2rem; font-weight: 600; }
+              main { flex: 1; display: flex; justify-content: center; align-items: center; padding: 24px; }
+              .tiles { display: flex; flex-wrap: wrap; gap: 32px; justify-content: center; }
+              .tile { display: flex; flex-direction: column; align-items: center;
+                      width: clamp(240px, 32vw, 480px); padding: clamp(20px, 2.5vw, 40px);
+                      background: var(--tile-bg); border-radius: 12px;
+                      box-shadow: var(--tile-shadow);
+                      text-decoration: none; color: var(--fg);
+                      transition: transform 0.15s ease, box-shadow 0.15s ease; }
+              .tile:hover { transform: translateY(-3px); box-shadow: var(--tile-shadow-hover); }
+              .tile img { width: 100%; height: clamp(160px, 22vw, 360px); object-fit: contain; margin-bottom: 20px; }
+              .tile span { font-size: clamp(1.1rem, 1.6vw, 1.5rem); font-weight: 500; color: var(--accent); text-align: center; }
+              footer { text-align: center; padding: 32px 24px 40px; color: #666; }
+            </style>
+          </head>
+          <body>
+            <header>
+              <h1>Reconstruction — PReSto</h1>
+              <p>Generated from <a href="https://github.com/${{ github.repository }}">${{ github.repository }}</a></p>
+            </header>
+            <main>
+              <div class="tiles">
+                ${FIG_TILE}
+                ${DATA_TILE}
+              </div>
+            </main>
+            <footer>
+              <small>Generated by <a href="https://paleopresto.com">PReSto</a></small>
+            </footer>
+          </body>
+          </html>
+          HTMLEOF
+
+          echo "Static viz contents:"
+          ls -lhR ./static-viz/
+
+      - name: Upload static-viz artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-viz-${{ github.run_number }}
+          path: ./static-viz/
+          retention-days: 7
+
+  # ── Deploy: pulls whichever path's output exists ────────────────────
+  deploy-to-github-pages:
+    needs: [find-latest-run, inspect-output, visualize-spatial, visualize-static]
+    if: always() && (needs.visualize-spatial.result == 'success' || needs.visualize-static.result == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Spatial: presto-viz uploads its own artifact under
+      # `presto-viz-output-<reconstruction_id>`. Try that first; if it
+      # doesn't exist (we're on the static path), fall back to the
+      # static-viz artifact.
+      - name: Download visualization artifact (spatial)
+        if: needs.inspect-output.outputs.is_spatial == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: presto-viz-output-Reconstruction_Run_${{ needs.find-latest-run.outputs.run_number }}_Reviz_${{ github.run_number }}
+          path: ./visualization-output
+
+      - name: Download visualization artifact (static)
+        if: needs.inspect-output.outputs.is_spatial == 'false'
+        uses: actions/download-artifact@v4
+        with:
+          name: static-viz-${{ github.run_number }}
+          path: ./visualization-output
+
+      - name: Prepare Pages content
+        run: |
+          # presto-viz delivers a `viz/` subdir; rename to `docs/` to
+          # match the link path used in its visualizer.html. Static viz
+          # has the same structure as the deploy expects out of the box.
+          if [ -d "./visualization-output/viz" ]; then
+            mv ./visualization-output/viz ./visualization-output/docs
+          fi
+          find ./visualization-output -type f -name "*.zip" -delete
+
+          # If presto-viz path: synthesize the same tile-style landing
+          # page (otherwise users land on raw visualizer.html). On
+          # static path, index.html is already present.
+          if [ ! -f ./visualization-output/index.html ]; then
+            mkdir -p ./visualization-output/images
+            cp images/visualization.png images/validation.png ./visualization-output/images/ 2>/dev/null || true
+            cat > ./visualization-output/index.html << 'HTMLEOF'
+          <!DOCTYPE html><html><head><meta charset="utf-8"><title>Reconstruction — PReSto</title>
+          <meta http-equiv="refresh" content="0; url=docs/visualizer.html"></head>
+          <body>Redirecting to <a href="docs/visualizer.html">visualizer</a>…</body></html>
+          HTMLEOF
+          fi
+
+          echo "Pages content:"
+          ls -lhR ./visualization-output/
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./visualization-output
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      # Homepage URL is set by the PReSto webhook handler using the user's
+      # OAuth token (GITHUB_TOKEN lacks admin permission to update repo settings).

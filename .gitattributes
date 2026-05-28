@@ -1,0 +1,23 @@
+# Force LF on files executed inside the Linux Docker container or by CI.
+# Without this, Windows authors' CRLF line endings break #! shebangs and
+# `set -e` behavior in entrypoint.sh, confuse Rscript / python3, and make
+# YAML workflow files unparseable in subtle ways.
+*.sh   text eol=lf
+*.R    text eol=lf
+*.r    text eol=lf
+*.py   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.stan text eol=lf
+Dockerfile text eol=lf
+
+# Normalize CSVs for reproducible diffs
+*.csv  text eol=lf
+
+# Binary assets (don't try to normalize)
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.nc   binary
+*.pkl  binary

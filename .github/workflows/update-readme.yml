@@ -1,0 +1,70 @@
+# Regenerates README.md from README_NOTES.md + config/user_config.yml +
+# query_params.json after every successful reconstruction.
+#
+# Hand-written prose in README_NOTES.md (and anything in README.md
+# ABOVE the <!-- BEGIN GENERATED --> marker) is preserved verbatim;
+# only the generated body is rewritten.
+#
+# Triggered after a successful "Reconstruction" workflow_run, or
+# manually via `gh workflow run update-readme.yml`.
+
+name: Update README
+
+on:
+  workflow_run:
+    workflows: ["Reconstruction"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  regenerate-readme:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch || github.ref_name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install pyyaml
+
+      - name: Regenerate README.md
+        run: |
+          OWNER_LC="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          REPO_NAME="${{ github.event.repository.name }}"
+          PAGES_URL="https://${OWNER_LC}.github.io/${REPO_NAME}/"
+          RELEASES_URL="${{ github.server_url }}/${{ github.repository }}/releases"
+          python scripts/generate_readme.py \
+            --pages-url    "${PAGES_URL}" \
+            --releases-url "${RELEASES_URL}" \
+            --repo-url     "${{ github.server_url }}/${{ github.repository }}"
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          git add README.md
+          if git diff --staged --quiet; then
+            echo "README.md already up to date."
+            exit 0
+          fi
+          git commit -m "Regenerate README from query_params.json + user_config.yml"
+          # Race-tolerant push — reconstruct or release-recon may push in
+          # parallel. Push HEAD:branch explicitly because the rebase
+          # leaves HEAD detached when the workflow was started with no
+          # explicit ref.
+          BRANCH="${{ github.ref_name || 'main' }}"
+          for i in 1 2 3; do
+            git pull --rebase origin "$BRANCH" && git push origin "HEAD:$BRANCH" && break || sleep $((i*5))
+          done

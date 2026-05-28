@@ -1,0 +1,249 @@
+# Core reconstruction pipeline. Two jobs:
+#   prepare-data  — acquires the LiPD proxy data (one of two pathways)
+#   reconstruct   — builds the container, runs the pipeline, commits results
+#
+# Triggered automatically when PReSto commits `query_params.json`, or
+# manually via the Actions tab (workflow_dispatch).
+#
+# CUSTOMIZATION: most authors don't need to edit this file. The two
+# things that ARE template-specific are baked into the algorithm / scripts
+# layers (Dockerfile, environment.yml, scripts/*). The artifact names
+# below use generic prefixes (`reconstruction-...`) so visualize.yml,
+# release-recon.yml, and update-readme.yml can find them without
+# per-template renaming.
+
+name: Reconstruction
+
+on:
+  push:
+    paths:
+      - 'query_params.json'   # PReSto commits this LAST so all files are present
+  workflow_dispatch:
+    inputs:
+      unique_id:
+        description: 'Unique reconstruction ID (used in citation metadata)'
+        required: false
+        type: string
+      lipd_query_json:
+        description: 'LiPD query payload as JSON (overrides query_params.json)'
+        required: false
+        type: string
+
+jobs:
+  # ── Job 1: Acquire proxy data ────────────────────────────────────────
+  # Two pathways, selected by query_params.json's `mode` field:
+  #   archived  — direct pickle download from lipdverse.org
+  #   filtered  — runs the lipdGenerator container to query lipdverse
+  # Either way produces lipd_legacy.pkl, uploaded as an artifact for Job 2.
+  prepare-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    permissions:
+      contents: write   # for committing CITATION.cff updates
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detect data acquisition pathway
+        id: pathway
+        run: |
+          if [ -f "query_params.json" ]; then
+            echo "pathway=github_actions" >> $GITHUB_OUTPUT
+            MODE=$(jq -r '.mode' query_params.json)
+            echo "mode=$MODE" >> $GITHUB_OUTPUT
+            echo "Using query_params.json from repo (mode: $MODE)"
+          elif [ -n "${{ inputs.lipd_query_json }}" ]; then
+            echo '${{ inputs.lipd_query_json }}' > query_params.json
+            echo "pathway=github_actions" >> $GITHUB_OUTPUT
+            MODE=$(jq -r '.mode' query_params.json)
+            echo "mode=$MODE" >> $GITHUB_OUTPUT
+            echo "Using lipd_query_json input (mode: $MODE)"
+          else
+            echo "ERROR: no query_params.json and no lipd_query_json input."
+            exit 1
+          fi
+
+      # PATH A: archived compilation (direct pickle download from lipdverse).
+      - name: Download archived compilation
+        if: steps.pathway.outputs.mode == 'archived'
+        run: |
+          COMPILATION=$(jq -r '.compilation' query_params.json)
+          VERSION=$(jq -r '.version' query_params.json)
+          PICKLE_URL="https://lipdverse.org/${COMPILATION}/${VERSION}/${COMPILATION}${VERSION}.pkl"
+          echo "Downloading archived compilation from: $PICKLE_URL"
+          curl -L -f "$PICKLE_URL" -o lipd_legacy.pkl
+          ls -lh lipd_legacy.pkl
+
+      # PATH B: filtered query via lipdGenerator container.
+      - name: Generate LiPD data from query
+        if: steps.pathway.outputs.mode == 'filtered'
+        run: |
+          echo "Querying lipdverse via lipdGenerator container..."
+          mkdir -p lipd_output
+          docker run --rm \
+            -v $(pwd)/query_params.json:/query_params.json:ro \
+            -v $(pwd)/lipd_output:/output \
+            davidedge/lipd_webapps:lipdGenerator /query_params.json /output pickle
+
+          if [ ! -f lipd_output/lipd_legacy.pkl ]; then
+            echo "ERROR: lipdGenerator did not produce lipd_legacy.pkl"
+            ls -la lipd_output/ || true
+            exit 1
+          fi
+          mv lipd_output/lipd_legacy.pkl lipd_legacy.pkl
+          ls -lh lipd_legacy.pkl
+
+      # Append data citations to the platform-level CITATION.cff using
+      # the same lipdGenerator container that builds the proxy DB.
+      - name: Generate citation files
+        run: |
+          RECON_ID="${{ inputs.unique_id }}"
+          [ -z "$RECON_ID" ] && RECON_ID=$(jq -r '.uniqueID // empty' query_params.json 2>/dev/null || echo "")
+          [ -z "$RECON_ID" ] && RECON_ID="${{ github.run_id }}"
+          mkdir -p citations_out
+
+          MERGE_FLAG=""
+          EXTRA_MOUNT=""
+          if [ -f CITATION.cff ]; then
+            EXTRA_MOUNT="-v $(pwd)/CITATION.cff:/existing_cff/CITATION.cff:ro"
+            MERGE_FLAG="--merge-cff=/existing_cff/CITATION.cff"
+          fi
+
+          docker run --rm \
+            -v "$(pwd)/lipd_legacy.pkl:/data/lipd_legacy.pkl:ro" \
+            -v "$(pwd)/citations_out:/citations_out" \
+            $EXTRA_MOUNT \
+            davidedge/lipd_webapps:lipdGenerator \
+            citations /data/lipd_legacy.pkl /citations_out \
+            --title="Reconstruction $RECON_ID" \
+            --url="https://github.com/${{ github.repository }}" \
+            --unique-id="$RECON_ID" \
+            --author="${{ github.repository_owner }}" \
+            $MERGE_FLAG
+          ls -lh citations_out/ 2>/dev/null || true
+
+      - name: Commit citation files
+        run: |
+          if [ ! -f citations_out/data_references.bib ] && [ ! -f citations_out/CITATION.cff ]; then
+            echo "No citation files generated; nothing to commit"
+            exit 0
+          fi
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          [ -f citations_out/data_references.bib ] && cp citations_out/data_references.bib data_references.bib && git add data_references.bib
+          [ -f citations_out/CITATION.cff ]        && cp citations_out/CITATION.cff        CITATION.cff        && git add CITATION.cff
+          if git diff --staged --quiet; then
+            echo "No citation file changes to commit"
+          else
+            git commit -m "Add data citations for reconstruction ${{ github.run_id }}"
+            # actions/checkout@v4 leaves HEAD detached on a SHA; the rebase
+            # below then succeeds but `git push` fails with "not currently on
+            # a branch". Push HEAD explicitly at the target branch instead.
+            BRANCH="${{ github.ref_name }}"
+            for i in 1 2 3; do
+              git pull --rebase origin "$BRANCH" && git push origin "HEAD:$BRANCH" && break || sleep $((i*5))
+            done
+          fi
+
+      - name: Upload proxy data artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reconstruction-proxy-data-${{ github.run_id }}
+          path: lipd_legacy.pkl
+          retention-days: 7
+
+  # ── Job 2: Build container + run reconstruction ─────────────────────
+  reconstruct:
+    needs: prepare-data
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download proxy data artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: reconstruction-proxy-data-${{ github.run_id }}
+
+      - name: Build container
+        # The from-scratch Dockerfile here takes ~10 min cold and ~1 min
+        # cached. Cache hit relies on environment.yml + Dockerfile being
+        # unchanged since the previous build.
+        run: docker build -t presto-template:local .
+
+      - name: Run reconstruction pipeline
+        run: |
+          mkdir -p ./results
+          echo "Config in use:"
+          cat config/user_config.yml
+          echo "---"
+          docker run --rm \
+            -v $(pwd)/lipd_legacy.pkl:/proxies/lipd_legacy.pkl:ro \
+            -v $(pwd)/config/user_config.yml:/app/config/user_config.yml:ro \
+            -v $(pwd)/results:/results \
+            presto-template:local
+
+      - name: Verify reconstruction results
+        run: |
+          if [ ! -f ./results/reconstruction.csv ]; then
+            echo "ERROR: reconstruction.csv not produced. Contents of ./results:"
+            ls -lR ./results/ || true
+            exit 1
+          fi
+          echo "Reconstruction completed successfully."
+          ls -lhR ./results/
+
+      - name: Generate configs.yml for visualization
+        # visualize.yml's presto-viz path expects configs.yml alongside
+        # the NetCDFs. Flatten the user_config into the simple
+        # {presto_config: {key: {value: ...}}} format that presto-viz reads.
+        run: |
+          python3 -c "
+          import yaml
+          with open('config/user_config.yml') as f:
+              flat = yaml.safe_load(f)
+          def flatten(d, prefix=''):
+              for k, v in d.items():
+                  key = f'{prefix}{k}' if not prefix else f'{prefix}.{k}'
+                  if isinstance(v, dict):
+                      yield from flatten(v, key)
+                  else:
+                      yield key, v
+          nested = {'presto_config': {k: {'value': str(v)} for k, v in flatten(flat)}}
+          with open('results/configs.yml', 'w') as f:
+              yaml.dump(nested, f, default_flow_style=False)
+          "
+          cat results/configs.yml
+
+      - name: Upload reconstruction artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reconstruction-${{ github.run_id }}
+          path: ./results/
+          retention-days: 90
+
+      - name: Commit small results to repo
+        # `-f` because results/ is in .gitignore (it's a local dev dir);
+        # CI is the only place that publishes its contents.
+        continue-on-error: true
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          find results/ -type f -size -100M | while read f; do git add -f "$f"; done
+          if git diff --staged --quiet; then
+            echo "No files under 100MB to commit"
+          else
+            git commit -m "Add reconstruction results for ${{ github.run_id }}"
+            # actions/checkout@v4 leaves HEAD detached on a SHA; the rebase
+            # below then succeeds but `git push` fails with "not currently on
+            # a branch". Push HEAD explicitly at the target branch instead.
+            BRANCH="${{ github.ref_name }}"
+            for i in 1 2 3; do
+              git pull --rebase origin "$BRANCH" && git push origin "HEAD:$BRANCH" && break || sleep $((i*5))
+            done
+          fi

@@ -1,0 +1,42 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# GitHub
+.github
+
+# Editor
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Bootstrap scratch
+_refs
+_*_src
+
+# Python
+__pycache__
+*.py[cod]
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# Docs (image doesn't need them at runtime; saves layer size)
+README.md
+README_NOTES.md
+ADAPTING.md
+docs
+
+# Workflow output (mounted in via -v at runtime, not baked into image)
+outputs
+results
+recons
+validation
+lipd_legacy.pkl
+lipd_data.pkl
+lipd_output

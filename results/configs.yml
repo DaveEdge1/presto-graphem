@@ -1,0 +1,7 @@
+presto_config:
+  min_proxies_per_year:
+    value: '5'
+  reconstruction_window.end:
+    value: '2000'
+  reconstruction_window.start:
+    value: '1'
