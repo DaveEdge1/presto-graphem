@@ -1,19 +1,14 @@
 #!/usr/bin/env bash
-# Orchestrates the demo reconstruction pipeline inside the container.
+# Orchestrates the GraphEM (cfr) reconstruction pipeline inside the container.
 #
-# Pipeline (DEMO):
-#   1. lipd_to_input.py     — LiPD pickle  → proxy_matrix.csv + proxy_metadata.csv
-#   2. reconstruct.py       — proxy_matrix → reconstruction.csv (mean composite)
-#   3. outputs_to_netcdf.py — reconstruction.csv → reconstruction.nc (1D CF-NetCDF)
-#   4. make_figures.py      — reconstruction.csv → figures/reconstruction_ts.png
+# Pipeline:
+#   1. lipd_to_input.py     — LiPD legacy pickle → cfr ProxyDatabase pickle
+#   2. reconstruct.py       — run_graphem_cfg → gridded NetCDF (job_r01_recon.nc)
+#   3. outputs_to_netcdf.py — finalize → reconstruction.nc (CF time/lat/lon) + reconstruction.csv
+#   4. make_figures.py      — field map + index timeseries → figures/*.png
 #
-# CUSTOMIZATION POINTS:
-#   - Add / remove steps as your algorithm needs.
-#   - Read env vars (LIPD_PICKLE, PRESTO_CONFIG, PRESTO_OUTPUT, PRESTO_REFDATA)
-#     instead of hard-coding paths — CI mounts these at consistent locations.
-#   - Set `set -e` (already on) so any failing step halts the run.
-#   - Anything you `echo` here shows up in the Actions log; use this for
-#     progress messages and config dumps that aid debugging.
+# CI mounts /proxies/lipd_legacy.pkl (RO), /app/config/user_config.yml (RO),
+# and /results (RW). The obs field is baked into the image (PRESTO_OBS).
 
 set -euo pipefail
 
@@ -21,49 +16,51 @@ LIPD_PICKLE="${LIPD_PICKLE:-/proxies/lipd_legacy.pkl}"
 CONFIG="${PRESTO_CONFIG:-/app/config/user_config.yml}"
 REFDATA="${PRESTO_REFDATA:-/app/reference_data}"
 OUT="${PRESTO_OUTPUT:-/results}"
+OBS="${PRESTO_OBS:-$REFDATA/gistemp1200_GHCNv4_ERSSTv5.nc}"
+PROXYDB="${PRESTO_PROXYDB:-/tmp/proxydb_cfr.pkl}"
 
 mkdir -p "$OUT" "$OUT/figures"
 
-echo "[entrypoint] presto-template demo pipeline"
+echo "[entrypoint] presto-graphem (GraphEM via cfr) pipeline"
 echo "[entrypoint] LIPD_PICKLE=$LIPD_PICKLE"
 echo "[entrypoint] CONFIG=$CONFIG"
+echo "[entrypoint] OBS=$OBS"
 echo "[entrypoint] OUT=$OUT"
 echo "[entrypoint] config in use:"
 cat "$CONFIG"
 echo "[entrypoint] ---"
 
-# Step 1: LiPD → proxy matrix CSV.
-# TODO: REPLACE if your algorithm reads LiPD records differently (e.g.,
-# you need PSM calibration, time-axis re-binning, or a non-LiPD source).
-echo "[entrypoint] Step 1/4: LiPD pickle → proxy matrix"
+if [ ! -f "$OBS" ]; then
+    echo "[entrypoint] ERROR: instrumental obs field not found at $OBS" >&2
+    ls -lh "$REFDATA" || true
+    exit 1
+fi
+
+# Step 1: LiPD legacy pickle → cfr ProxyDatabase pickle.
+echo "[entrypoint] Step 1/4: LiPD pickle → cfr ProxyDatabase"
 python /app/scripts/lipd_to_input.py \
-    --pickle       "$LIPD_PICKLE" \
-    --out-matrix   "$OUT/proxy_matrix.csv" \
-    --out-metadata "$OUT/proxy_metadata.csv"
+    --pickle "$LIPD_PICKLE" \
+    --out    "$PROXYDB"
 
-# Step 2: run the demo reconstruction algorithm.
-# TODO: REPLACE — this is where your science goes.
-echo "[entrypoint] Step 2/4: reconstruction"
+# Step 2: run GraphEM via cfr.run_graphem_cfg.
+echo "[entrypoint] Step 2/4: GraphEM reconstruction"
 python /app/scripts/reconstruct.py \
-    --proxy-matrix "$OUT/proxy_matrix.csv" \
-    --config       "$CONFIG" \
-    --out-csv      "$OUT/reconstruction.csv"
+    --config  "$CONFIG" \
+    --proxydb "$PROXYDB" \
+    --obs     "$OBS" \
+    --out     "$OUT"
 
-# Step 3: emit a CF-friendly NetCDF (presto-viz consumes this if it's
-# spatial; otherwise the static-Pages visualize.yml fallback picks up
-# the CSV + figures and ignores the .nc).
-# TODO: REPLACE if your output is gridded (lat/lon/time) — emit those
-# dims so visualize.yml's autodetect routes you to presto-viz.
-echo "[entrypoint] Step 3/4: CSV → NetCDF"
+# Step 3: finalize gridded NetCDF (CF lat/lon → presto-viz) + index CSV.
+echo "[entrypoint] Step 3/4: finalize NetCDF + CSV"
 python /app/scripts/outputs_to_netcdf.py \
-    --in-csv "$OUT/reconstruction.csv" \
-    --out-nc "$OUT/reconstruction.nc"
+    --in-nc   "$OUT/job_r01_recon.nc" \
+    --out-nc  "$OUT/reconstruction.nc" \
+    --out-csv "$OUT/reconstruction.csv"
 
-# Step 4: figures. Drop more PNGs into $OUT/figures as needed; the
-# static-Pages visualize fallback surfaces whatever is here.
+# Step 4: figures.
 echo "[entrypoint] Step 4/4: figures"
 python /app/scripts/make_figures.py \
-    --in-csv  "$OUT/reconstruction.csv" \
+    --in-nc   "$OUT/reconstruction.nc" \
     --out-dir "$OUT/figures"
 
 echo "[entrypoint] Done. Contents of $OUT:"

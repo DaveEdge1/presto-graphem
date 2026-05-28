@@ -1,21 +1,56 @@
 cff-version: 1.2.0
 message: If you use this reconstruction, please cite the references below. Additionally,
   please cite the underlying paleoclimate data sources listed in data_references.bib
-  (482 publications across 647 datasets) and the lipdverse compilation.
-title: PReSto reconstruction template
+  and the lipdverse compilation.
+title: PReSto GraphEM reconstruction
 type: software
 authors:
-- family-names: Your last name
-  given-names: Your first name
-url: https://github.com/DaveEdge1/presto-template
+- family-names: Edge
+  given-names: David
+url: https://github.com/DaveEdge1/presto-graphem
 references:
 - type: article
-  title: 'REPLACE: cite the paper that introduces your reconstruction method here'
+  title: 'Statistical paleoclimate reconstructions via Markov random fields'
   authors:
-  - family-names: Author
-    given-names: First
-  year: 2026
-  notes: Method reference for the reconstruction wrapped by this template.
+  - family-names: Guillot
+    given-names: Dominique
+  - family-names: Rajaratnam
+    given-names: Bala
+  - family-names: Emile-Geay
+    given-names: Julien
+  journal: 'The Annals of Applied Statistics'
+  volume: 9
+  issue: 1
+  start: 324
+  end: 352
+  year: 2015
+  doi: 10.1214/14-AOAS794
+  notes: The GraphEM (Graphical Expectation-Maximization) method.
+- type: article
+  title: 'cfr (v2024.1.26): a Python package for climate field reconstruction'
+  authors:
+  - family-names: Zhu
+    given-names: F.
+  - family-names: Emile-Geay
+    given-names: J.
+  - family-names: Hakim
+    given-names: G. J.
+  - family-names: Guillot
+    given-names: D.
+  - family-names: Khider
+    given-names: D.
+  - family-names: Tardif
+    given-names: R.
+  - family-names: Perkins
+    given-names: W. A.
+  journal: 'Geoscientific Model Development'
+  volume: 17
+  issue: 8
+  start: 3409
+  end: 3431
+  year: 2024
+  doi: 10.5194/gmd-17-3409-2024
+  notes: The cfr / cfr-graphem implementation used to run GraphEM.
 - type: software
   title: The Paleoclimate Reconstruction Storehouse (PReSto) platform
   authors:
@@ -31,4 +66,4 @@ references:
   url: https://zenodo.org/record/8274756
 - type: generic
   title: Source paleoclimate data bibliography
-  notes: 482 publications across 647 datasets in data_references.bib
+  notes: Underlying proxy data sources in data_references.bib.

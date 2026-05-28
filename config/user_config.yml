@@ -1,29 +1,67 @@
-# PReSto reconstruction config — user-overwritable knobs.
+# PReSto GraphEM reconstruction config — flat cfr config.
 #
-# This file is OVERWRITTEN by the PReSto server on each reconstruction
-# submission with the user's chosen parameters. The version committed
-# here is the DEFAULT used by manual / local runs and CI smoke tests.
+# This file is OVERWRITTEN by the PReSto server on each submission with
+# the user's chosen parameters (the server starts from
+# prestoForm/graph_em/config_default.yml, which mirrors this schema, and
+# overrides only the form-exposed keys). The version committed here is the
+# DEFAULT used by manual / local runs and CI smoke tests.
 #
-# CUSTOMIZATION:
-#   - Replace the demo knobs below with the parameters your algorithm
-#     actually needs. Keep the file schema flat-ish (one or two levels
-#     of nesting) so scripts/generate_readme.py can render it as a
-#     markdown table without special handling.
-#   - Document every knob with a short comment explaining valid ranges /
-#     options. PReSto's UI surfaces these comments to users.
+# It is consumed verbatim by cfr.ReconJob.run_graphem_cfg (see
+# scripts/reconstruct.py). Keys map 1:1 onto that method's reads.
+# The defaults below reproduce the tropical-Pacific coral SST
+# reconstruction from cfr's GraphEM tutorial.
 
-# ── DEMO KNOBS ──────────────────────────────────────────────────────
-# Used only by scripts/reconstruct.py (the placeholder algorithm).
-# Replace when you swap in your real reconstruction code.
+# ── Proxy database ──────────────────────────────────────────────────
+# proxydb_path is produced at runtime by scripts/lipd_to_input.py from the
+# mounted /proxies/lipd_legacy.pkl, and is OVERRIDDEN by reconstruct.py
+# (--proxydb). The value here is only a placeholder for standalone runs.
+proxydb_path: /tmp/proxydb_cfr.pkl
+filter_proxydb_args: []
+filter_proxydb_kwargs:
+  by: ptype
+  keys:
+  - coral
+annualize_proxydb_months: [12, 1, 2]
+annualize_proxydb_ptypes: [coral]
+proxydb_center_ref_period: [1901, 2000]
+# uniform_pdb keeps only proxies that extend back to recon_period[0] so the
+# reconstructed network is stable in length. Required by run_graphem_cfg.
+uniform_pdb: true
 
-# Year window (inclusive) the reconstruction is computed over.
-# Years outside this range are dropped from the proxy matrix before
-# the per-year composite is calculated.
-reconstruction_window:
-  start: 1
-  end: 2000
+# ── Instrumental observation field (baked into the image) ───────────
+obs_path:
+  tas: /app/reference_data/gistemp1200_GHCNv4_ERSSTv5.nc
+obs_rename_dict:
+  tas: tempanomaly
+obs_time_name: time
+obs_lat_name: lat
+obs_lon_name: lon
+obs_anom_period: [1951, 1980]
+obs_annualize_months: [12, 1, 2]
+obs_regrid_nlat: 42
+obs_regrid_nlon: 63
+# Crop the obs field to the region to reconstruct (tropical Pacific box).
+obs_lat_min: -20
+obs_lat_max: 20
+obs_lon_min: 150
+obs_lon_max: 260
 
-# Minimum number of non-NaN proxies a year must have to be included
-# in the output. Lower values keep more years but with noisier means;
-# higher values are more conservative.
-min_proxies_per_year: 5
+# ── Reconstruction window ───────────────────────────────────────────
+recon_period: [1871, 2000]
+recon_timescale: 1
+calib_period: [1901, 2000]
+
+# ── Graph estimation / GraphEM solver ───────────────────────────────
+# graph_method: "neighborhood", "glasso", or "hybrid".
+graph_method: hybrid
+cutoff_radius: 1500
+sp_FF: 3
+sp_FP: 4
+sp_PP: 3
+output_indices: [gm, nhm, shm, nino3.4]
+compress_params:
+  zlib: true
+
+# ── Output (overridden at runtime to /results by reconstruct.py) ────
+save_dirpath: /results
+save_filename: job_r01_recon.nc

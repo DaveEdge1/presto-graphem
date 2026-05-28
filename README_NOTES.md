@@ -1,27 +1,32 @@
-# PReSto reconstruction — TODO: rename your reconstruction here
+# PReSto — GraphEM gridded climate-field reconstruction
 
 > This file is **prepended verbatim** to the auto-generated `README.md`
-> by `update-readme.yml`. Use it for hand-written prose that should
-> survive each regeneration (intro paragraph, citations, scientific
-> context, anything you don't want overwritten).
->
-> Everything in `README.md` *below* the `<!-- BEGIN GENERATED -->`
-> marker is rebuilt from `config/user_config.yml` + `query_params.json`
-> after every successful reconstruction.
+> by `update-readme.yml`. Everything below the `<!-- BEGIN GENERATED -->`
+> marker in `README.md` is rebuilt from `config/user_config.yml` +
+> `query_params.json` after each successful run.
 
-**Author:** *Your name here*
-**Method paper:** *DOI or link to the paper that describes your reconstruction*
+**Method:** GraphEM (Graphical Expectation-Maximization)
+**Method paper:** Guillot, Rajaratnam & Emile-Geay (2015), *The Annals of
+Applied Statistics* — [doi:10.1214/14-AOAS794](https://doi.org/10.1214/14-AOAS794)
+**Implementation:** [`cfr`](https://fzhu2e.github.io/cfr/) + `cfr-graphem`
+(`ReconJob.run_graphem_cfg`)
 
-## What this template does
+## What this reconstruction does
 
-*A short paragraph describing your reconstruction. Replace this with
-your actual project description before going live.*
+GraphEM reconstructs a **gridded climate field** (e.g. surface temperature)
+back in time by combining an instrumental observation field with proxy
+records. It models the joint field+proxy covariance as a Gaussian Markov
+random field, learns the graph (which grid cells and proxies are
+conditionally dependent) and fills in the pre-instrumental field with an
+EM algorithm. Unlike data-assimilation methods, GraphEM uses no climate-model
+prior — the spatial covariance is estimated directly from the calibration
+period.
 
-This template ships as a **runnable demo** — it composites the Pages2k
-Temperature 2.2.0 proxies into a 1D timeseries using a simple per-year
-mean. The pipeline is wired end-to-end (LiPD adapter → algorithm →
-NetCDF + figures → static-Pages visualization), so you can verify CI
-works before you swap in your real code.
+The default configuration reproduces the tropical-Pacific coral SST
+reconstruction from cfr's GraphEM tutorial: coral proxies are calibrated
+against the GISTEMP (GHCNv4 + ERSSTv5) instrumental field over a tropical
+Pacific box, with a hybrid neighborhood→GLASSO graph. Output is a gridded
+`(time, lat, lon)` NetCDF plus global / hemispheric / Niño-3.4 index series,
+visualized through the interactive presto-viz map.
 
-See [`ADAPTING.md`](ADAPTING.md) for the step-by-step guide to making
-this template your own.
+See [`ADAPTING.md`](ADAPTING.md) for the template scaffolding this is built on.

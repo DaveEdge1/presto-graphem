@@ -1,31 +1,29 @@
 #!/usr/bin/env python3
-"""DEMO: LiPD legacy pickle → generic proxy matrix + metadata CSVs.
+"""LiPD legacy pickle -> cfr.ProxyDatabase DataFrame pickle.
 
-This is the data-ingestion step of the demo pipeline. It reads a
-lipdverse "legacy" pickle (e.g. Pages2kTemperature2_2_0.pkl, the
-default that ships in query_params.json), flattens it to time-series
-records via the original `lipd` (LiPD-utilities) library, and emits
-two CSVs that the reconstruction step consumes:
+GraphEM (via cfr.ReconJob.run_graphem_cfg) consumes a proxy database loaded
+with `ProxyDatabase().fetch(<path.pkl>)`, which reads a pickled pandas
+DataFrame (one row per proxy record) through `ProxyDatabase.from_df`. This
+adapter turns the lipdverse "legacy" pickle the platform mounts at
+/proxies/lipd_legacy.pkl into exactly that DataFrame and pickles it.
 
-    proxy_matrix.csv
-        year, <pid_1>, <pid_2>, ..., <pid_n>
-        one row per year on a 1..2000-AD axis (configurable), NaN for missing
+Unlike the demo adapter (which bins to a year x proxy matrix), cfr wants the
+raw (time, value) pairs per record — cfr does its own annual binning in
+`annualize_proxydb`. So each output row carries a `year` array and a
+`paleoData_values` array.
 
-    proxy_metadata.csv
-        pid, lat, lon, elev, ptype
-        one row per proxy column, in matrix order
+Columns emitted (matching ProxyDatabase.from_df defaults):
+    paleoData_pages2kID  — unique proxy id (pid)
+    geo_meanLat/Lon/Elev — coordinates
+    year                 — time axis (year CE), array
+    paleoData_values     — proxy values, array (aligned to year)
+    ptype                — "archive.proxy" (e.g. coral.d18O)
+    archiveType          — raw archive string (kept for reference)
+    paleoData_variableName, paleoData_units
 
-──────────────────────────────────────────────────────────────────────
-TODO: REPLACE if your algorithm reads LiPD records differently.
-Common reasons to rewrite:
-    • You need PSM (proxy system model) calibration — pull the cfr
-      ProxyDatabase pattern from LMR2's lipd_to_pdb.py instead.
-    • You need to bin onto a non-annual axis (decadal, monthly, irregular).
-    • You ingest from a non-LiPD source (a static CSV, a NetCDF, etc.)
-      — drop the lipd dependency and read your source format directly.
-    • You need archive- or proxy-type filtering before adapter output —
-      filter `records` after `_extract_ts` and before `build_csvs`.
-──────────────────────────────────────────────────────────────────────
+Extraction mirrors the template adapter: try lipd.extractTs, then fall back
+to a raw walk of the legacy {'D': {datasetName: ds}} layout. The ptype
+mapping is ported from LMR2/scripts/lipd_to_pdb.py.
 """
 
 from __future__ import annotations
@@ -39,11 +37,102 @@ import numpy as np
 import pandas as pd
 
 
+# ── Proxy-type mapping (ported from LMR2/scripts/lipd_to_pdb.py) ──────────────
+PTYPE_MAP = {
+    ('tree',            'trw'):                      'tree.TRW',
+    ('tree',            'tree ring width'):           'tree.TRW',
+    ('tree',            'ringwidth'):                 'tree.TRW',
+    ('tree',            'ring width'):                'tree.TRW',
+    ('tree',            'mxd'):                       'tree.MXD',
+    ('tree',            'maximum latewood density'):  'tree.MXD',
+    ('wood',            'trw'):                       'tree.TRW',
+    ('wood',            'ringwidth'):                 'tree.TRW',
+    ('wood',            'ring width'):                'tree.TRW',
+    ('wood',            'mxd'):                       'tree.MXD',
+    ('coral',           'd18o'):                      'coral.d18O',
+    ('coral',           'srca'):                      'coral.SrCa',
+    ('coral',           'sr/ca'):                     'coral.SrCa',
+    ('coral',           'calcification'):             'coral.calc',
+    ('sclerosponge',    'd18o'):                      'sclerosponge.d18O',
+    ('sclerosponge',    'srca'):                      'sclerosponge.SrCa',
+    ('ice core',        'd18o'):                      'ice.d18O',
+    ('ice core',        'dd'):                        'ice.dD',
+    ('ice core',        'd2h'):                       'ice.dD',
+    ('ice core',        'melt'):                      'ice.melt',
+    ('ice core',        'accumulation'):              'ice.accumulation',
+    ('glacierice',      'd18o'):                      'ice.d18O',
+    ('glacierice',      'dd'):                        'ice.dD',
+    ('lake sediment',   'varve_thickness'):           'lake.varve_thickness',
+    ('lake sediment',   'varve thickness'):           'lake.varve_thickness',
+    ('lake sediment',   'varve_property'):            'lake.varve_property',
+    ('lake sediment',   'chironomid'):                'lake.chironomid',
+    ('lake sediment',   'midge'):                     'lake.midge',
+    ('lake sediment',   'reflectance'):               'lake.reflectance',
+    ('lake sediment',   'bsi'):                       'lake.BSi',
+    ('lake sediment',   'accumulation'):              'lake.accumulation',
+    ('lakesediment',    'chironomid'):                'lake.chironomid',
+    ('lakesediment',    'reflectance'):               'lake.reflectance',
+    ('lakesediment',    'bsi'):                       'lake.BSi',
+    ('marine sediment', 'alkenone'):                  'marine.alkenone',
+    ('marine sediment', 'uk37'):                      'marine.alkenone',
+    ('marine sediment', 'mgca'):                      'marine.MgCa',
+    ('marine sediment', 'mg/ca'):                     'marine.MgCa',
+    ('marine sediment', 'tex86'):                     'marine.other',
+    ('marine sediment', 'temperature'):               'marine.other',
+    ('marinesediment',  'alkenone'):                  'marine.alkenone',
+    ('marinesediment',  'uk37'):                      'marine.alkenone',
+    ('marinesediment',  'mgca'):                      'marine.MgCa',
+    ('borehole',        'temperature'):               'borehole',
+    ('speleothem',      'd18o'):                      'speleothem.d18O',
+    ('documents',       'temperature'):               'documents',
+    ('bivalve',         'd18o'):                      'bivalve.d18O',
+    ('molluskshell',    'd18o'):                      'bivalve.d18O',
+}
+
+ARCHIVE_DEFAULTS = {
+    'tree':                 'tree.TRW',
+    'wood':                 'tree.TRW',
+    'coral':                'coral.d18O',
+    'ice core':             'ice.d18O',
+    'glacierice':           'ice.d18O',
+    'lake sediment':        'lake.other',
+    'lakesediment':         'lake.other',
+    'marine sediment':      'marine.other',
+    'marinesediment':       'marine.other',
+    'speleothem':           'speleothem.d18O',
+    'borehole':             'borehole',
+    'documents':            'documents',
+    'sclerosponge':         'sclerosponge.d18O',
+    'bivalve':              'bivalve.d18O',
+    'molluskshell':         'bivalve.d18O',
+    'hybrid':               'hybrid',
+    'peat':                 'lake.other',
+    'terrestrialsediment':  'lake.other',
+}
+
+
+def create_ptype(archive_type, standard_name) -> str:
+    arch = str(archive_type or '').lower().strip()
+    std  = str(standard_name  or '').lower().strip()
+    arch_nsp = arch.replace(' ', '')
+    key = (arch, std)
+    if key in PTYPE_MAP:
+        return PTYPE_MAP[key]
+    for (a, s), ptype in PTYPE_MAP.items():
+        if a.replace(' ', '') == arch_nsp and s == std:
+            return ptype
+    for (a, s), ptype in PTYPE_MAP.items():
+        if (a == arch or a.replace(' ', '') == arch_nsp) and s and s in std:
+            return ptype
+    return ARCHIVE_DEFAULTS.get(arch, ARCHIVE_DEFAULTS.get(arch_nsp, f'{arch}.unknown'))
+
+
+# ── Time-axis handling (mirrors the template adapter) ─────────────────────────
 def _coerce_year(years_raw, ages_raw, year_units: str = "") -> np.ndarray:
     """Return year-AD as a float array.
 
     Prefer the record's 'year' axis if present; otherwise convert 'age'
-    (years BP, 1950 reference). Same convention Holocene DA uses.
+    (years BP, 1950 reference).
     """
     if years_raw is not None and len(years_raw):
         arr = np.asarray(years_raw, dtype=float)
@@ -55,21 +144,6 @@ def _coerce_year(years_raw, ages_raw, year_units: str = "") -> np.ndarray:
     return np.array([], dtype=float)
 
 
-def _aggregate_to_annual(years: np.ndarray, vals: np.ndarray,
-                         year_axis: np.ndarray) -> np.ndarray:
-    """Bin a record onto the common annual axis (mean within each bin)."""
-    mask = np.isfinite(years) & np.isfinite(vals)
-    if not mask.any():
-        return np.full(year_axis.shape, np.nan)
-    df = pd.DataFrame({"year": np.floor(years[mask]).astype(int),
-                       "v": vals[mask]})
-    agg = df.groupby("year", as_index=True)["v"].mean()
-    out = pd.Series(np.nan, index=year_axis)
-    common = agg.index.intersection(year_axis)
-    out.loc[common] = agg.loc[common]
-    return out.to_numpy()
-
-
 def _safe_float(x) -> float:
     try:
         return float(x)
@@ -77,18 +151,38 @@ def _safe_float(x) -> float:
         return float("nan")
 
 
+# Variable names that are time axes / metadata, never proxy values.
+_SKIP_VARS = {
+    "year", "age", "depth", "depthtop", "depthbottom", "depthcomposite",
+    "yearce", "yearad", "agebp", "ageka", "time", "latitude", "longitude",
+    "elevation", "uncertainty",
+}
+
+
+def _is_skip_var(vname: str) -> bool:
+    v = str(vname or "").strip().lower()
+    return (v in _SKIP_VARS or v.startswith("depth")
+            or v.startswith("age") or v.startswith("year")
+            or v.startswith("uncertainty"))
+
+
 def _extract_ts(pkl_path: Path) -> list[dict]:
     """Load the legacy pickle and flatten to a list of time-series dicts.
 
-    Tries lipd.extractTs first (canonical path used by Holocene DA). If
-    that library or call fails — e.g. the pickle is shaped slightly
-    differently — falls back to a defensive raw walker that handles the
-    {'D': {name: ds}} layout directly.
+    lipdverse "legacy" pickles carry a pre-extracted 'TS' list (the output of
+    lipd.extractTs: one flat dict per paleo column, with paleoData_* / geo_* /
+    year keys) alongside the nested 'D'. Prefer 'TS' — it's already the shape
+    build_proxydb wants and needs no lipd dependency. Otherwise try
+    lipd.extractTs, then a defensive raw walk of the {'D': {name: ds}} layout.
     """
     with pkl_path.open("rb") as f:
         raw = pickle.load(f)
 
-    # Unwrap the 'D' container if present (Pages2kTemperature, Temp12k, etc.)
+    if isinstance(raw, dict) and isinstance(raw.get("TS"), list) and raw["TS"]:
+        print(f"[lipd_to_input] using embedded 'TS' list ({len(raw['TS'])} records)",
+              file=sys.stderr)
+        return raw["TS"]
+
     D = raw.get("D", raw) if isinstance(raw, dict) else raw
 
     try:
@@ -100,13 +194,20 @@ def _extract_ts(pkl_path: Path) -> list[dict]:
             return ts
         print("[lipd_to_input] lipd.extractTs returned 0 records — falling back",
               file=sys.stderr)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — any failure → raw walk
         print(f"[lipd_to_input] lipd.extractTs failed ({e}); falling back to raw walk",
               file=sys.stderr)
 
-    # Raw walker — handles the legacy {'D': {datasetName: <ds>}} layout
-    # where each <ds> is itself a dict with paleoData/geo/etc.
     out: list[dict] = []
+
+    def _as_entries(x):
+        # paleoData / measurementTable may be a list or an (Ordered)dict keyed
+        # by table name; normalise to a list of values.
+        if isinstance(x, dict):
+            return list(x.values())
+        if isinstance(x, list):
+            return x
+        return []
 
     def _flatten_ds(name: str, ds: dict) -> None:
         if not isinstance(ds, dict):
@@ -116,9 +217,15 @@ def _extract_ts(pkl_path: Path) -> list[dict]:
         lon  = _safe_float(geo_props.get("longitude"))
         elev = _safe_float(geo_props.get("elevation"))
         archive = str(ds.get("archiveType", "unknown")).lower()
-        for pd_entry in (ds.get("paleoData") or []):
-            for mt in (pd_entry.get("measurementTable") or []):
+        for pd_entry in _as_entries(ds.get("paleoData")):
+            if not isinstance(pd_entry, dict):
+                continue
+            for mt in _as_entries(pd_entry.get("measurementTable")):
+                if not isinstance(mt, dict):
+                    continue
                 cols = mt.get("columns") or []
+                if isinstance(cols, dict):
+                    cols = list(cols.values())
                 year_col = next((c for c in cols
                                  if str(c.get("variableName", "")).lower() == "year"), None)
                 age_col  = next((c for c in cols
@@ -144,6 +251,7 @@ def _extract_ts(pkl_path: Path) -> list[dict]:
                         "geo_meanElev": elev,
                         "archiveType":  archive,
                         "paleoData_proxy": c.get("proxy", c.get("proxyGeneral", vname)),
+                        "paleoData_units": c.get("units", "unknown"),
                     })
 
     if isinstance(D, dict):
@@ -162,91 +270,114 @@ def _extract_ts(pkl_path: Path) -> list[dict]:
     return out
 
 
-def build_csvs(pkl_path: Path, out_matrix: Path, out_metadata: Path,
-               year_start: int = 1, year_end: int = 2000) -> None:
+def build_proxydb(pkl_path: Path, out_path: Path) -> None:
     records = _extract_ts(pkl_path)
     if not records:
         raise SystemExit("No records extracted from LiPD pickle — cannot proceed.")
 
-    year_axis = np.arange(year_start, year_end + 1, dtype=int)
-    matrix: dict[str, np.ndarray] = {"year": year_axis}
-    meta_rows: list[tuple[str, float, float, float, str]] = []
+    rows: list[dict] = []
     seen_ids: set[str] = set()
     dropped = 0
 
     for rec in records:
-        ds_name = str(rec.get("dataSetName", "")) or "unknown"
+        ds_name  = str(rec.get("dataSetName", "")) or "unknown"
         var_name = str(rec.get("paleoData_variableName", ""))
-        if var_name.lower() in ("year", "age", "depth", "depthtop", "depthbottom"):
+        if _is_skip_var(var_name):
             continue
+
         raw_vals = rec.get("paleoData_values")
         if raw_vals is None:
+            dropped += 1
             continue
         try:
             vals = np.asarray(raw_vals, dtype=float)
         except (TypeError, ValueError):
             dropped += 1
             continue
+
         years = _coerce_year(rec.get("year"), rec.get("age"),
                              year_units=str(rec.get("yearUnits", "")))
-        if years.size == 0 or vals.size == 0 or years.size != vals.size:
+        # Align and drop non-finite pairs.
+        n = min(years.size, vals.size)
+        if n == 0:
+            dropped += 1
+            continue
+        years, vals = years[:n], vals[:n]
+        mask = np.isfinite(years) & np.isfinite(vals)
+        if not mask.any():
+            dropped += 1
+            continue
+        years, vals = years[mask], vals[mask]
+        order = np.argsort(years)
+        years, vals = years[order], vals[order]
+
+        # Constant-value records carry no signal and can destabilise GraphEM.
+        if np.std(vals) < 1e-9:
             dropped += 1
             continue
 
-        rid = f"{ds_name}__{var_name}"
-        base = rid
-        i = 1
-        while rid in seen_ids:
+        lat = _safe_float(rec.get("geo_meanLat"))
+        lon = _safe_float(rec.get("geo_meanLon"))
+        if not (np.isfinite(lat) and np.isfinite(lon)):
+            dropped += 1
+            continue
+        elev = _safe_float(rec.get("geo_meanElev"))
+
+        archive = str(rec.get("archiveType")
+                       or rec.get("paleoData_archiveType") or "unknown").lower()
+        proxy   = str(rec.get("paleoData_proxy")
+                      or rec.get("paleoData_proxyObservationType") or var_name)
+        ptype   = create_ptype(archive, proxy)
+
+        # Prefer a stable unique id (TSid / pages2kID) so the cfr pid matches
+        # the lipdverse catalog; fall back to dataset+variable.
+        pid = str(rec.get("paleoData_TSid")
+                  or rec.get("paleoData_pages2kID")
+                  or f"{ds_name}__{var_name}")
+        base, i = pid, 1
+        while pid in seen_ids:
             i += 1
-            rid = f"{base}__{i}"
-        seen_ids.add(rid)
+            pid = f"{base}__{i}"
+        seen_ids.add(pid)
 
-        series = _aggregate_to_annual(years, vals, year_axis)
-        if not np.isfinite(series).any():
-            dropped += 1
-            continue
+        rows.append({
+            "paleoData_pages2kID":    pid,
+            "geo_meanLat":            lat,
+            "geo_meanLon":            lon,
+            "geo_meanElev":           elev,
+            "year":                   years,
+            "paleoData_values":       vals,
+            "ptype":                  ptype,
+            "archiveType":            archive,
+            "paleoData_variableName": var_name,
+            "paleoData_units":        str(rec.get("paleoData_units", "unknown")),
+        })
 
-        archive = str(rec.get("archiveType", "unknown")).lower()
-        proxy   = str(rec.get("paleoData_proxy", var_name)).lower()
-        ptype   = f"{archive}.{proxy}" if proxy else archive
-
-        matrix[rid] = series
-        meta_rows.append((
-            rid,
-            _safe_float(rec.get("geo_meanLat")),
-            _safe_float(rec.get("geo_meanLon")),
-            _safe_float(rec.get("geo_meanElev")),
-            ptype,
-        ))
-
-    if len(matrix) <= 1:
+    if not rows:
         raise SystemExit(
-            f"All {len(records)} records were dropped during alignment "
+            f"All {len(records)} records were dropped during conversion "
             f"({dropped} explicitly rejected) — cannot proceed."
         )
 
-    df_matrix = pd.DataFrame(matrix)
-    df_meta = pd.DataFrame(meta_rows, columns=["pid", "lat", "lon", "elev", "ptype"])
+    df = pd.DataFrame(rows)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_pickle(out_path)
 
-    out_matrix.parent.mkdir(parents=True, exist_ok=True)
-    df_matrix.to_csv(out_matrix, index=False)
-    df_meta.to_csv(out_metadata, index=False)
-    print(f"[lipd_to_input] wrote {out_matrix} "
-          f"({df_matrix.shape[0]} years x {df_matrix.shape[1]-1} proxies)")
-    print(f"[lipd_to_input] wrote {out_metadata} "
-          f"({len(meta_rows)} records, {dropped} dropped)")
+    ptype_counts = df["ptype"].value_counts()
+    print(f"[lipd_to_input] wrote {out_path} ({len(df)} records, {dropped} dropped)")
+    print("[lipd_to_input] proxy-type breakdown:")
+    for pt, cnt in ptype_counts.items():
+        print(f"    {pt:<32} {cnt:>4}")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pickle",       required=True, type=Path)
-    ap.add_argument("--out-matrix",   required=True, type=Path)
-    ap.add_argument("--out-metadata", required=True, type=Path)
-    ap.add_argument("--year-start",   type=int, default=1)
-    ap.add_argument("--year-end",     type=int, default=2000)
+    ap.add_argument("--pickle", required=True, type=Path,
+                    help="LiPD legacy pickle (the platform's /proxies/lipd_legacy.pkl)")
+    ap.add_argument("--out", required=True, type=Path,
+                    help="output cfr ProxyDatabase DataFrame pickle")
     args = ap.parse_args()
-    build_csvs(args.pickle, args.out_matrix, args.out_metadata,
-               year_start=args.year_start, year_end=args.year_end)
+    build_proxydb(args.pickle, args.out)
 
 
 if __name__ == "__main__":
