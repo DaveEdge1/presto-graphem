@@ -43,7 +43,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Detect data acquisition pathway
         id: pathway
@@ -137,7 +137,7 @@ jobs:
             echo "No citation file changes to commit"
           else
             git commit -m "Add data citations for reconstruction ${{ github.run_id }}"
-            # actions/checkout@v4 leaves HEAD detached on a SHA; the rebase
+            # actions/checkout@v5 leaves HEAD detached on a SHA; the rebase
             # below then succeeds but `git push` fails with "not currently on
             # a branch". Push HEAD explicitly at the target branch instead.
             BRANCH="${{ github.ref_name }}"
@@ -147,7 +147,7 @@ jobs:
           fi
 
       - name: Upload proxy data artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: reconstruction-proxy-data-${{ github.run_id }}
           path: lipd_legacy.pkl
@@ -163,10 +163,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download proxy data artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: reconstruction-proxy-data-${{ github.run_id }}
 
@@ -226,7 +226,7 @@ jobs:
           cat results/configs.yml
 
       - name: Upload reconstruction artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: reconstruction-${{ github.run_id }}
           path: ./results/
@@ -244,7 +244,7 @@ jobs:
             echo "No files under 100MB to commit"
           else
             git commit -m "Add reconstruction results for ${{ github.run_id }}"
-            # actions/checkout@v4 leaves HEAD detached on a SHA; the rebase
+            # actions/checkout@v5 leaves HEAD detached on a SHA; the rebase
             # below then succeeds but `git push` fails with "not currently on
             # a branch". Push HEAD explicitly at the target branch instead.
             BRANCH="${{ github.ref_name }}"

@@ -66,10 +66,10 @@ jobs:
       is_spatial: ${{ steps.detect.outputs.is_spatial }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download reconstruction artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ needs.find-latest-run.outputs.artifact_name }}
           path: ./recon-data
@@ -84,7 +84,7 @@ jobs:
         # source artifact directly; re-upload under a stable name so
         # the visualize jobs below grab the same files without
         # passing tokens around.
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: recon-data-for-viz-${{ github.run_number }}
           path: ./recon-data/
@@ -126,10 +126,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download recon data
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: recon-data-for-viz-${{ github.run_number }}
           path: ./viz
@@ -234,7 +234,7 @@ jobs:
           ls -lhR ./static-viz/
 
       - name: Upload static-viz artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: static-viz-${{ github.run_number }}
           path: ./static-viz/
@@ -252,10 +252,10 @@ jobs:
     continue-on-error: true
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download recon data
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: recon-data-for-viz-${{ github.run_number }}
           path: ./recon-data
@@ -282,7 +282,7 @@ jobs:
           ls -lhR ./validation
 
       - name: Upload validation artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: validation-output-${{ github.run_number }}
           path: ./validation/
@@ -302,7 +302,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # Spatial: presto-viz uploads its own artifact under
       # `presto-viz-output-<reconstruction_id>`. Try that first; if it
@@ -310,14 +310,14 @@ jobs:
       # static-viz artifact.
       - name: Download visualization artifact (spatial)
         if: needs.inspect-output.outputs.is_spatial == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: presto-viz-output-Reconstruction_Run_${{ needs.find-latest-run.outputs.run_number }}_Reviz_${{ github.run_number }}
           path: ./visualization-output
 
       - name: Download visualization artifact (static)
         if: needs.inspect-output.outputs.is_spatial == 'false'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: static-viz-${{ github.run_number }}
           path: ./visualization-output
@@ -328,7 +328,7 @@ jobs:
       - name: Download validation artifact
         if: needs.validate.result == 'success'
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: validation-output-${{ github.run_number }}
           path: ./visualization-output/validation
@@ -412,18 +412,18 @@ jobs:
           ls -lhR ./visualization-output/
 
       - name: Setup Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
         with:
           enablement: true
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: ./visualization-output
 
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
 
       # Homepage URL is set by the PReSto webhook handler using the user's
       # OAuth token (GITHUB_TOKEN lacks admin permission to update repo settings).

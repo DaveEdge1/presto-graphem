@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Resolve run ID
         id: resolve
@@ -69,7 +69,7 @@ jobs:
 
       - name: Download reconstruction artifact
         if: steps.skip.outputs.skip == 'false'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: reconstruction-${{ steps.resolve.outputs.recon_run_id }}
           path: ./bundle/results
@@ -81,7 +81,7 @@ jobs:
         # logic in downstream tools is best-effort.
         if: steps.skip.outputs.skip == 'false'
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: reconstruction-proxy-data-${{ steps.resolve.outputs.recon_run_id }}
           path: ./bundle/proxy
