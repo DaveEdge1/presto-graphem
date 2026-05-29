@@ -187,6 +187,11 @@ jobs:
             -v $(pwd)/config/user_config.yml:/app/config/user_config.yml:ro \
             -v $(pwd)/results:/results \
             presto-template:local
+          # The container runs as root, so everything it writes into the
+          # mounted results/ (including cfr's own configs.yml) is root-owned.
+          # Reclaim ownership so the unprivileged runner can rewrite those
+          # files in later steps (e.g. the presto-viz configs.yml below).
+          sudo chown -R "$(id -u):$(id -g)" results
 
       - name: Verify reconstruction results
         run: |

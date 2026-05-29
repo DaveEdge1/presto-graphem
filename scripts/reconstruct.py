@@ -20,10 +20,42 @@ committed.
 from __future__ import annotations
 
 import argparse
+import math
 import tempfile
 from pathlib import Path
 
 import yaml
+
+
+def _is_nan(x) -> bool:
+    return x is None or (isinstance(x, float) and math.isnan(x))
+
+
+def _sanitize_annualize_months(cfg: dict) -> None:
+    """Translate PReSto's "annualize over the full calendar year" sentinel.
+
+    PReSto encodes that choice as a NaN list (e.g. ``obs_annualize_months:
+    [.nan]``). cfr's calendar default for ``months`` is ``list(range(1, 13))``,
+    but a NaN list is *not* equivalent to that: cfr's climate-field annualize
+    indexes a month-anchor list with ``months[-1] - 1``, which becomes a float
+    when the last month is NaN and raises ``TypeError``. The proxy annualize
+    swallows the same error in a try/except, so NaN months silently leave the
+    proxy DB un-annualized rather than crashing. Either way the run is wrong.
+
+    Replace any all-NaN / empty months list (or bare NaN) with the calendar
+    year so both the proxy DB and the obs field are annualized consistently.
+    """
+    calendar_year = list(range(1, 13))
+    for key, val in cfg.items():
+        if "annualize" not in key or not key.endswith("months"):
+            continue
+        if isinstance(val, (list, tuple)):
+            if not val or all(_is_nan(m) for m in val):
+                cfg[key] = calendar_year
+                print(f"[reconstruct] {key}={list(val)!r} -> calendar year {calendar_year}")
+        elif _is_nan(val):
+            cfg[key] = calendar_year
+            print(f"[reconstruct] {key}={val!r} -> calendar year {calendar_year}")
 
 
 def _validate_recon_period(cfg: dict) -> None:
@@ -60,6 +92,7 @@ def run(config_path: Path, proxydb: Path, obs: Path | None, out_dir: Path) -> No
         else:
             cfg["obs_path"] = {"tas": str(obs)}
 
+    _sanitize_annualize_months(cfg)
     _validate_recon_period(cfg)
 
     out_dir.mkdir(parents=True, exist_ok=True)
