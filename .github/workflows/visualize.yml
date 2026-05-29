@@ -240,9 +240,57 @@ jobs:
           path: ./static-viz/
           retention-days: 7
 
+  # ── Validation: instrumental skill report (spatial path only) ───────
+  # Compares the reconstructed field to the baked GISTEMP obs and produces
+  # validation/index.html + skill maps. Best-effort: a validation failure
+  # must never block the visualization deploy, so continue-on-error and the
+  # deploy gates the validation tile on the artifact actually existing.
+  validate:
+    needs: [find-latest-run, inspect-output]
+    if: needs.inspect-output.outputs.is_spatial == 'true'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download recon data
+        uses: actions/download-artifact@v4
+        with:
+          name: recon-data-for-viz-${{ github.run_number }}
+          path: ./recon-data
+
+      - name: Build container
+        run: docker build -t presto-graphem:local .
+
+      - name: Run validation
+        run: |
+          mkdir -p ./validation
+          # GISTEMP is baked into the image at /app/reference_data; mount only
+          # the recon data + an output dir. `python` is the presto-env
+          # interpreter (baked onto PATH in the Dockerfile).
+          docker run --rm \
+            --entrypoint python \
+            -v $(pwd)/recon-data:/recons:ro \
+            -v $(pwd)/validation:/validation \
+            -e RECON_DIR=/recons \
+            -e VALIDATION_DIR=/validation \
+            -e REFERENCE_DIR=/app/reference_data \
+            presto-graphem:local \
+            /app/scripts/validate_graphem.py
+          sudo chown -R "$(id -u):$(id -g)" validation
+          ls -lhR ./validation
+
+      - name: Upload validation artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-output-${{ github.run_number }}
+          path: ./validation/
+          retention-days: 30
+
   # ── Deploy: pulls whichever path's output exists ────────────────────
   deploy-to-github-pages:
-    needs: [find-latest-run, inspect-output, visualize-spatial, visualize-static]
+    needs: [find-latest-run, inspect-output, visualize-spatial, visualize-static, validate]
     if: always() && (needs.visualize-spatial.result == 'success' || needs.visualize-static.result == 'success')
     runs-on: ubuntu-latest
     permissions:
@@ -274,6 +322,17 @@ jobs:
           name: static-viz-${{ github.run_number }}
           path: ./visualization-output
 
+      # Best-effort: lands the validation report under validation/ next to
+      # the visualizer. Skipped on the static path and tolerant of a failed
+      # validate job — the tile below only appears if the report exists.
+      - name: Download validation artifact
+        if: needs.validate.result == 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: validation-output-${{ github.run_number }}
+          path: ./visualization-output/validation
+
       - name: Prepare Pages content
         run: |
           # presto-viz delivers a `viz/` subdir; rename to `docs/` to
@@ -284,16 +343,68 @@ jobs:
           fi
           find ./visualization-output -type f -name "*.zip" -delete
 
-          # If presto-viz path: synthesize the same tile-style landing
-          # page (otherwise users land on raw visualizer.html). On
-          # static path, index.html is already present.
+          # The static path already ships its own tile index.html. For the
+          # presto-viz path, synthesize a landing page with a Visualization
+          # tile and — when a validation report was produced — a Validation
+          # tile beside it (otherwise users land on raw visualizer.html and
+          # the validation report is unreachable).
           if [ ! -f ./visualization-output/index.html ]; then
             mkdir -p ./visualization-output/images
             cp images/visualization.png images/validation.png ./visualization-output/images/ 2>/dev/null || true
-            cat > ./visualization-output/index.html << 'HTMLEOF'
-          <!DOCTYPE html><html><head><meta charset="utf-8"><title>Reconstruction — PReSto</title>
-          <meta http-equiv="refresh" content="0; url=docs/visualizer.html"></head>
-          <body>Redirecting to <a href="docs/visualizer.html">visualizer</a>…</body></html>
+
+            VIZ_TILE=""
+            if [ -f ./visualization-output/docs/visualizer.html ]; then
+              VIZ_TILE='<a class="tile" href="docs/visualizer.html"><img src="images/visualization.png" alt="Visualize Results"><span>Visualize Results</span></a>'
+            fi
+            VALIDATION_TILE=""
+            if [ -f ./visualization-output/validation/index.html ]; then
+              VALIDATION_TILE='<a class="tile" href="validation/index.html"><img src="images/validation.png" alt="Reconstruction Validation"><span>Reconstruction Validation</span></a>'
+            fi
+
+            cat > ./visualization-output/index.html << HTMLEOF
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Reconstruction — PReSto</title>
+            <style>
+              :root { --bg:#f7f8fa; --fg:#1a1a1a; --accent:#2563eb; --tile-bg:#fff;
+                      --tile-shadow:0 2px 8px rgba(0,0,0,0.08);
+                      --tile-shadow-hover:0 6px 18px rgba(0,0,0,0.14); }
+              * { box-sizing:border-box; }
+              body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+                     background:var(--bg); color:var(--fg); margin:0; min-height:100vh;
+                     display:flex; flex-direction:column; }
+              header { text-align:center; padding:48px 24px 24px; }
+              header h1 { margin:0; font-size:2rem; font-weight:600; }
+              main { flex:1; display:flex; justify-content:center; align-items:center; padding:24px; }
+              .tiles { display:flex; flex-wrap:wrap; gap:32px; justify-content:center; }
+              .tile { display:flex; flex-direction:column; align-items:center;
+                      width:clamp(240px,32vw,480px); padding:clamp(20px,2.5vw,40px);
+                      background:var(--tile-bg); border-radius:12px; box-shadow:var(--tile-shadow);
+                      text-decoration:none; color:var(--fg);
+                      transition:transform 0.15s ease, box-shadow 0.15s ease; }
+              .tile:hover { transform:translateY(-3px); box-shadow:var(--tile-shadow-hover); }
+              .tile img { width:100%; height:clamp(160px,22vw,360px); object-fit:contain; margin-bottom:20px; }
+              .tile span { font-size:clamp(1.1rem,1.6vw,1.5rem); font-weight:500; color:var(--accent); text-align:center; }
+              footer { text-align:center; padding:32px 24px 40px; color:#666; }
+            </style>
+          </head>
+          <body>
+            <header>
+              <h1>Reconstruction — PReSto</h1>
+              <p>Generated from <a href="https://github.com/${{ github.repository }}">${{ github.repository }}</a></p>
+            </header>
+            <main>
+              <div class="tiles">
+                ${VIZ_TILE}
+                ${VALIDATION_TILE}
+              </div>
+            </main>
+            <footer><small>Generated by <a href="https://paleopresto.com">PReSto</a></small></footer>
+          </body>
+          </html>
           HTMLEOF
           fi
 
